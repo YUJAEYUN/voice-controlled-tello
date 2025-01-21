@@ -6,9 +6,11 @@ import os
 import json
 import time
 from dotenv import load_dotenv
+import cv2
+import threading
 
 # .env 파일 로드
-load_dotenv()
+load_dotenv('.env.example')
 
 # Gemini API 초기화
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
@@ -21,6 +23,7 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 class TelloController:
     def __init__(self):
         self.tello = Tello()
+        self.stream_on = False
         
     # 드론 제어를 위한 함수들을 Function Calling 형태로 정의
     available_functions = {
@@ -35,25 +38,22 @@ class TelloController:
             "parameters": {}
         },
         "move": {
-            "name": "move",
-            "description": "드론을 지정된 방향으로 이동시킵니다",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down", "left", "right", "forward", "back"]
-                    },
-                    "distance": {
-                        "type": "integer",
-                        "description": "이동 거리 (cm)",
-                        "minimum": 20,
-                        "maximum": 500
-                    }
-                },
-                "required": ["direction", "distance"]
-            }
+    "name": "move",
+    "description": "드론을 지정된 방향으로 이동시킵니다",
+    "parameters": {
+        "direction": {
+            "type": "string",
+            "enum": ["up", "down", "left", "right", "forward", "back"],
+            "description": "이동 방향"
         },
+        "distance": {
+            "type": "integer",
+            "description": "이동 거리 (cm)",
+            "minimum": 20,
+            "maximum": 500
+        }
+    }
+},
         "rotate": {
             "name": "rotate",
             "description": "드론을 회전시킵니다",
@@ -88,6 +88,12 @@ class TelloController:
         if battery < 10:
             raise Exception("배터리가 너무 부족합니다")
         
+        # 카메라 스트리밍 시작
+        print("카메라 스트리밍 시작...")
+        self.tello.streamon()
+        self.stream_on = True
+        print("✓ 카메라 스트리밍 시작됨!")
+        
         return True
 
     def execute_function(self, function_name: str, parameters: Dict[str, Any] = None):
@@ -95,10 +101,21 @@ class TelloController:
         try:
             if function_name == "takeoff":
                 print("이륙!")
+                # 이륙 전 카메라가 켜져있지 않다면 켜기
+                if not self.stream_on:
+                    print("카메라 스트리밍 시작...")
+                    self.tello.streamon()
+                    self.stream_on = True
+                    print("✓ 카메라 스트리밍 시작됨!")
                 return self.tello.takeoff()
-                
+            
             elif function_name == "land":
                 print("착륙!")
+                # 착륙 후 카메라 스트리밍 종료
+                if self.stream_on:
+                    print("카메라 스트리밍 종료...")
+                    self.tello.streamoff()
+                    self.stream_on = False
                 return self.tello.land()
                 
             elif function_name == "move":
@@ -134,6 +151,15 @@ class TelloController:
         except Exception as e:
             print(f"명령 실행 중 오류 발생: {str(e)}")
             raise
+        
+    def __del__(self):
+        """소멸자: 프로그램 종료 시 카메라 스트리밍 정리"""
+        if self.stream_on:
+            try:
+                self.tello.streamoff()
+            except:
+                pass
+
 
 def process_voice_command(audio_text: str) -> Dict:
     """음성 명령을 Function calling 형식으로 변환"""
@@ -166,6 +192,30 @@ def process_voice_command(audio_text: str) -> Dict:
         print(f"Gemini API 오류: {str(e)}")
         raise
 
+def video_stream(tello):
+    """카메라 스트리밍을 처리하는 스레드 함수"""
+    while True:
+        try:
+            # 프레임 읽기
+            frame = tello.get_frame_read().frame
+            if frame is None:
+                continue
+                
+            # 프레임 크기 조정
+            frame = cv2.resize(frame, (640, 480))
+            
+            # 화면에 표시
+            cv2.imshow("Tello Camera", frame)
+            
+            # 'q' 키를 누르면 종료
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        except Exception as e:
+            print(f"비디오 스트리밍 오류: {str(e)}")
+            break
+    
+    cv2.destroyAllWindows()
+
 def main():
     controller = TelloController()
     recognizer = sr.Recognizer()
@@ -181,6 +231,10 @@ def main():
     
     try:
         controller.connect()
+        
+        # 비디오 스트리밍 스레드 시작
+        video_thread = threading.Thread(target=video_stream, args=(controller.tello,), daemon=True)
+        video_thread.start()
         
         with sr.Microphone() as source:
             while True:
@@ -225,7 +279,11 @@ def main():
             pass
     
     finally:
+        # 정리 작업
+        if controller.stream_on:
+            controller.tello.streamoff()
         controller.tello.end()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main() 

@@ -7,7 +7,7 @@ from djitellopy import Tello
 import time
 from datetime import datetime
 import numpy as np
-from openai import OpenAI
+import google.generativeai as genai
 from dotenv import load_dotenv
 import base64
 from gtts import gTTS
@@ -15,10 +15,14 @@ import pygame
 import tempfile
 
 # .env 파일 로드
-load_dotenv()
+load_dotenv('.env.example')
 
-# OpenAI 클라이언트 초기화
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+# Gemini API 설정
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+genai.configure(api_key=GOOGLE_API_KEY)
+
+# Gemini 모델 초기화
+model = genai.GenerativeModel('gemini-1.5-pro')
 
 app = Flask(__name__)
 
@@ -90,6 +94,8 @@ class TelloController:
             if self.frame_reader:
                 frame = self.frame_reader.frame
                 if frame is not None:
+                    # BGR을 RGB로 변환
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     frame = cv2.resize(frame, (640, 480))
                     
                     if self.frame_queue.full():
@@ -113,9 +119,13 @@ class TelloController:
         filename = f'photos/tello_scan_{timestamp}.jpg'
         
         frame = self.frame_reader.frame
-        cv2.imwrite(filename, frame)
-        print(f"사진 저장됨: {filename}")
-        return filename, frame
+        if frame is not None:
+            # BGR을 RGB로 변환하여 저장
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            cv2.imwrite(filename, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))  # 저장 시 BGR로 변환
+            print(f"사진 저장됨: {filename}")
+            return filename, frame
+        return None, None
 
     def create_panorama(self):
         """파노라마 촬영"""
@@ -158,34 +168,66 @@ class TelloController:
             raise
 
     def analyze_image(self, image_path: str) -> str:
-        """GPT Vision으로 이미지 분석"""
+        """Gemini Vision으로 이미지 분석"""
         try:
+            # 이미지를 바이트로 읽기
             with open(image_path, "rb") as image_file:
-                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-                
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "이 이미지에서 보이는 것을 자세히 설명해주세요."},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=500
-            )
+                image_data = image_file.read()
+
+            # Gemini 모델에 이미지와 프롬프트 전송
+            response = model.generate_content([
+                "이 이미지에서 보이는 것을 자세히 설명해주세요.",
+                {
+                    "mime_type": "image/jpeg",
+                    "data": image_data
+                }
+            ])
             
-            return response.choices[0].message.content
+            return response.text
+
         except Exception as e:
             print(f"이미지 분석 오류: {str(e)}")
-            return f"이미지 분석 중 오류가 발생했습니다: {str(e)}"
+            raise
+
+    def text_to_speech(self, text: str) -> str:
+        """텍스트를 음성으로 변환"""
+        try:
+            # 임시 파일 생성
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_file:
+                tts = gTTS(text=text, lang='ko')
+                tts.save(temp_file.name)
+                return temp_file.name
+        except Exception as e:
+            print(f"TTS 변환 오류: {str(e)}")
+            raise
+
+    def process_voice_command(self, command: str) -> str:
+        """음성 명령 처리"""
+        try:
+            # Gemini 모델에 명령어 전송
+            response = model.generate_content([{
+                "role": "user",
+                "parts": [{"text": f"""
+                다음 명령어를 분석하고 드론 제어 명령으로 해석해주세요: '{command}'
+                가능한 명령어:
+                - 이륙/착륙
+                - 전진/후진/좌/우 이동
+                - 상승/하강
+                - 회전
+                - 사진 촬영
+                응답 형식: {{
+                    "command": "명령어 종류",
+                    "params": {{필요한 매개변수}},
+                    "description": "설명"
+                }}
+                """}]
+            }])
+            
+            return response.text
+
+        except Exception as e:
+            print(f"명령어 처리 오류: {str(e)}")
+            raise
 
     def speak(self, text: str):
         """텍스트를 음성으로 변환하여 재생"""
@@ -284,6 +326,8 @@ def get_frame():
     while True:
         if controller and not controller.frame_queue.empty():
             frame = controller.frame_queue.get()
+            # RGB를 BGR로 다시 변환 (웹 스트리밍을 위해)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             _, buffer = cv2.imencode('.jpg', frame)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
