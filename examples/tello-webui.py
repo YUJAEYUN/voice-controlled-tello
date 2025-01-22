@@ -15,7 +15,7 @@ import pygame
 import tempfile
 
 # .env 파일 로드
-load_dotenv('.env.example')
+load_dotenv()
 
 # Gemini API 설정
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
@@ -327,7 +327,7 @@ def get_frame():
         if controller and not controller.frame_queue.empty():
             frame = controller.frame_queue.get()
             # RGB를 BGR로 다시 변환 (웹 스트리밍을 위해)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
             _, buffer = cv2.imencode('.jpg', frame)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
